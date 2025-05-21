@@ -17,6 +17,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy, enable_wrap, wrap
 from torch.distributed.fsdp.fully_sharded_data_parallel import MixedPrecision
 from transformers.models.phi.modeling_phi import PhiDecoderLayer
+# from torch.distributed.fsdp import state_dict_type, FullStateDictConfig
 
 import wandb
 
@@ -107,7 +108,7 @@ def collate_fn(batch, tokenizer, max_length):
 
 def evaluate(model, ref_model, dataloader, local_rank, global_rank, beta):
     model.eval()
-    print(f"[EVAL ENTRY] global_rank={global_rank}, local_rank={local_rank}, has {len(dataloader)} eval batches", flush=True)
+    # print(f"[EVAL ENTRY] global_rank={global_rank}, local_rank={local_rank}, has {len(dataloader)} eval batches", flush=True)
     results = []
 
     with torch.no_grad():
@@ -224,7 +225,7 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
                 })
 
         evaluate(model, ref_model, eval_loader, local_rank, global_rank, beta)
-        print(f"[rank {global_rank}] finished evaluate()", flush=True)
+        # print(f"[rank {global_rank}] finished evaluate()", flush=True)
 
 
 def main():
@@ -281,9 +282,35 @@ def main():
     optimizer = AdamW(model.parameters(), lr=args.lr)
     train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, local_rank, global_rank, epochs=args.epochs, beta=args.beta)
 
-    if global_rank == 0:
-        print("rank 0 is saving the checkpoint")
-        torch.save(model.state_dict(), "fsdp_model_checkpoint.pt")
+    if dist.get_rank() == 0:
+        print("[rank 0] preparing to save model...", flush=True)
+
+    # Gather the full state dict across all ranks
+    state_dict = model.state_dict()
+    dist.barrier()
+    
+    # Save only on rank 0
+    if dist.get_rank() == 0:
+        torch.save(state_dict, "fsdp_model_checkpoint.pt")
+        print("[rank 0] checkpoint saved!", flush=True)
+    
+    dist.barrier()  # optional: sync all ranks before continuing
+
+    # if global_rank == 0:
+    #     print("Saving FSDP model...", flush=True)
+    
+    # # Gather full state dict on rank 0 only
+    # with FSDP.state_dict_type(
+    #     model,
+    #     state_dict_type="full",
+    #     state_dict_config=FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+    # ):
+    #     full_state = model.state_dict()
+    
+    # # Now save only on rank 0
+    # if global_rank == 0:
+    #     torch.save(full_state, "fsdp_model_checkpoint.pt")
+    #     print("Checkpoint saved.", flush=True)
 
 
 if __name__ == "__main__":
