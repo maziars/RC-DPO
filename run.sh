@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
-
-python src/train.py \
-    --epochs 10 \
-    --batch_size 64 \
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+torchrun --nproc-per-node=1 src/train_fsdp.py\
+    --epochs 1 \
+    --batch_size 1 \
     --max_length 512 \
     --lr 1e-6 \
     --beta 0.1 \
