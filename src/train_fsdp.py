@@ -81,29 +81,34 @@ def wrap_with_fsdp(model):
 
 
 def collate_fn(batch, tokenizer, max_length):
-    prompt_encodings = tokenizer(
-        ['Instruct: ' + item['prompt'] + '\n' for item in batch],
-        padding='max_length', truncation=True, max_length=max_length, return_tensors='pt')
-    chosen_encodings = tokenizer(
-        ['Output: ' + item['chosen'] for item in batch],
-        padding='max_length', truncation=True, max_length=max_length, return_tensors='pt')
-    rejected_encodings = tokenizer(
-        ['Output: ' + item['rejected'] for item in batch],
-        padding='max_length', truncation=True, max_length=max_length, return_tensors='pt')
+    prompt_texts = ['<|system|>\n' + item['system']+ '<|user|>\n' +item['prompt'] + '\n' for item in batch]
+    chosen_texts = ['<|assistant|>\n' + item['chosen'] for item in batch]
+    rejected_texts = ['<|assistant|>\n' + item['rejected'] for item in batch]
 
-    prompt_preferred_ids = torch.cat([prompt_encodings.input_ids, chosen_encodings.input_ids], dim=-1)
-    prompt_dispreferred_ids = torch.cat([prompt_encodings.input_ids, rejected_encodings.input_ids], dim=-1)
-    prompt_preferred_mask = torch.cat([prompt_encodings.attention_mask, chosen_encodings.attention_mask], dim=-1)
-    prompt_dispreferred_mask = torch.cat([prompt_encodings.attention_mask, rejected_encodings.attention_mask], dim=-1)
-    prompt_lengths = prompt_encodings.attention_mask.sum(dim=-1)
+    chosen_inputs = tokenizer(
+        [p + c for p, c in zip(prompt_texts, chosen_texts)],
+        padding='max_length', truncation=True, max_length=max_length, return_tensors='pt'
+    )
+    rejected_inputs = tokenizer(
+        [p + r for p, r in zip(prompt_texts, rejected_texts)],
+        padding='max_length', truncation=True, max_length=max_length, return_tensors='pt'
+    )
+
+    # Get where prompt ends
+    prompt_only_inputs = tokenizer(
+        prompt_texts,
+        padding='max_length', truncation=True, max_length=max_length, return_tensors='pt'
+    )
+    prompt_lengths = prompt_only_inputs.attention_mask.sum(dim=-1)  # [B]
 
     return {
-        'prompt_preferred_ids': prompt_preferred_ids,
-        'prompt_dispreferred_ids': prompt_dispreferred_ids,
-        'prompt_preferred_mask': prompt_preferred_mask,
-        'prompt_dispreferred_mask': prompt_dispreferred_mask,
+        'prompt_preferred_ids': chosen_inputs.input_ids,
+        'prompt_dispreferred_ids': rejected_inputs.input_ids,
+        'prompt_preferred_mask': chosen_inputs.attention_mask,
+        'prompt_dispreferred_mask': rejected_inputs.attention_mask,
         'prompt_lengths': prompt_lengths
     }
+
 
 
 def evaluate(model, ref_model, dataloader, local_rank, global_rank, beta):
@@ -275,9 +280,9 @@ def main():
     collate = partial(collate_fn, tokenizer=tokenizer, max_length=args.max_length)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
     if len(eval_dataset) == 0:
-        eval_loader = DataLoader([], batch_size=args.batch_size)
+        eval_loader = DataLoader([], batch_size=8)
     else:
-        eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
+        eval_loader = DataLoader(eval_dataset, batch_size=8, shuffle=False, collate_fn=collate)
 
     optimizer = AdamW(model.parameters(), lr=args.lr)
     train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, local_rank, global_rank, epochs=args.epochs, beta=args.beta)
