@@ -34,6 +34,55 @@ from functools import partial
 import wandb
 
 
+import torch.distributed as dist
+from collections import defaultdict
+from collections.abc import Iterable
+
+
+
+def gather_and_aggregate_results(local_results, metric_keys):
+    """
+    Gathers and aggregates per-example results (list of dicts) across all ranks.
+    Supports both scalar and list/array values for each metric key.
+
+    Args:
+        local_results (List[Dict[str, Union[float, List[float]]]]): Local list of metric dicts.
+        metric_keys (List[str]): Metric keys to aggregate.
+
+    Returns:
+        Dict[str, List[float]]: Aggregated values across all ranks per key.
+    """
+    if not local_results:
+        local_results = [{k: 0.0 for k in metric_keys}]
+
+    gathered_results = [None for _ in range(dist.get_world_size())]
+    dist.all_gather_object(gathered_results, local_results)
+
+    # Flatten gathered list of lists
+    all_results = sum(gathered_results, [])
+
+    # Filter out dummy rows (all 0.0s)
+    def is_dummy(d):
+        return all(
+            (isinstance(v, Iterable) and not isinstance(v, str) and all(x == 0.0 for x in v))
+            or (not isinstance(v, Iterable) and v == 0.0)
+            for v in d.values()
+        )
+    all_results = [r for r in all_results if not is_dummy(r)]
+
+    # Aggregate
+    aggregated = defaultdict(list)
+    for res in all_results:
+        for k in metric_keys:
+            v = res[k]
+            if isinstance(v, Iterable) and not isinstance(v, str):
+                aggregated[k].extend(v)
+            else:
+                aggregated[k].append(v)
+
+    return dict(aggregated)
+
+
 def seed_everything(seed=2003):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -224,32 +273,33 @@ def dpo_collate_fn(batch, tokenizer, max_length):
 
 
 
-def evaluate(model, ref_model, dataloader, local_rank, global_rank, beta, args):
+def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args):
     model.eval()
     # print(f"[EVAL ENTRY] global_rank={global_rank}, local_rank={local_rank}, has {len(dataloader)} eval batches", flush=True)
     results = []
+    
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating"):
             batch = {k: v.cuda() for k, v in batch.items()}
 
             with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
-                model_preferred_logits = model(batch['chosen'], attention_mask=batch['chosen_padding_mask']).logits
-                
-                model_dispreferred_logits = model(batch['rejected'], attention_mask=batch['rejected_padding_mask']).logits
+                model_preferred_logits = model(batch['chosen'], attention_mask=batch['chosen_padding_mask'])
+                model_dispreferred_logits = model(batch['rejected'], attention_mask=batch['rejected_padding_mask'])
 
-            # model_preferred_logprob = get_log_prob(model_preferred_logits, batch['prompt_preferred_ids'], batch['prompt_lengths'])
-            model_preferred_logprob = compute_logprobs(model_preferred_logits, batch['chosen'], batch['chosen_mask'])
-            # model_dispreferred_logprob = get_log_prob(model_dispreferred_logits, batch['prompt_dispreferred_ids'], batch['prompt_lengths'])
-            model_dispreferred_logprob = compute_logprobs(model_dispreferred_logits, batch['rejected'], batch['rejected_mask'])
+            model_preferred_logprob = []
+            model_dispreferred_logprob = []
+            for i, beta in enumerate(betas):
+                # print(f"model_preferred_logits[i]: {model_preferred_logits[i].shape}")
+                model_preferred_logprob.append(compute_logprobs(model_preferred_logits[i], batch['chosen'], batch['chosen_mask']))
+                model_dispreferred_logprob.append(compute_logprobs(model_dispreferred_logits[i], batch['rejected'], batch['rejected_mask']))
 
             with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
                 ref_preferred_logits = ref_model(batch['chosen'], attention_mask=batch['chosen_padding_mask']).logits
                 ref_dispreferred_logits = ref_model(batch['rejected'], attention_mask=batch['rejected_padding_mask']).logits
 
-            # ref_preferred_logprob = get_log_prob(ref_preferred_logits, batch['prompt_preferred_ids'], batch['prompt_lengths'])
+            
             ref_preferred_logprob = compute_logprobs(ref_preferred_logits, batch['chosen'], batch['chosen_mask'])
-            # ref_dispreferred_logprob = get_log_prob(ref_dispreferred_logits, batch['prompt_dispreferred_ids'], batch['prompt_lengths'])
             ref_dispreferred_logprob = compute_logprobs(ref_dispreferred_logits, batch['rejected'], batch['rejected_mask'])
 
             loss, preferred_relative_logprob, dispreferred_relative_logprob, reward_accuracies, reward_margins = calculate_DPO_loss(
@@ -257,30 +307,49 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, beta, args):
                 ref_preferred_logprob, ref_dispreferred_logprob,
                 beta=beta)
 
-            for i in range(batch['chosen'].size(0)):
-                results.append([
-                    loss.item(),
-                    preferred_relative_logprob.item(),
-                    dispreferred_relative_logprob.item(),
-                    reward_accuracies.item(),
-                    reward_margins.item(),
-                ])
 
-    # Gather from all ranks
-    if results:
-        local_results = torch.tensor(results, dtype=torch.float32, device=torch.cuda.current_device())
-    else:
-        local_results = torch.zeros((1, 5), dtype=torch.float32, device=torch.cuda.current_device())  # dummy row
-    
-    results_obj = results
-    gathered_results = [None for _ in range(dist.get_world_size())]
-    dist.all_gather_object(gathered_results, results_obj)
-    
-    flat = sum(gathered_results, [])
-    all_results = torch.tensor(flat, dtype=torch.float32, device=torch.cuda.current_device())
-    
-    # (OPTIONAL) Remove dummy rows if needed
-    all_results = all_results[~torch.all(all_results == 0, dim=1)]
+
+            losses = torch.zeros(len(betas)).cuda()
+            rewards = []
+            preferred_relative_logprobs = torch.zeros(len(betas)).cuda()
+            dispreferred_relative_logprobs = torch.zeros(len(betas)).cuda()
+            reward_accuracies = torch.zeros(len(betas)).cuda()
+            reward_margins = torch.zeros(len(betas)).cuda()
+            rewards = []
+            
+            for i, beta in enumerate(betas):
+                losses[i], preferred_relative_logprobs[i], dispreferred_relative_logprobs[i], reward_accuracies[i], reward_margins[i], reward = calculate_DPO_loss(
+                model_preferred_logprob[i], model_dispreferred_logprob[i],
+                ref_preferred_logprob, ref_dispreferred_logprob,
+                beta=beta)
+                rewards.append(reward)
+        
+            total_loss = losses.mean()
+            rewards_tensor = torch.stack(rewards, dim=0)  # shape: (n, B)
+            
+            with torch.no_grad():
+                mean_rewards = rewards_tensor.mean(dim=0)  # shape: (B,)
+            regularizer = ((rewards_tensor - mean_rewards)**2).mean()
+            
+            total_loss += 1.0 * regularizer
+
+            for i in range(batch['chosen'].size(0)):
+                log_D = {
+                        'total loss': total_loss.item(),
+                        'regularizer': regularizer.item()
+                    }
+                for i, beta in enumerate(betas):
+                    log_D[f"loss[{beta}]"] = losses[i].item()
+                    log_D[f"preferred_relative_logprob[{beta}]"] = preferred_relative_logprobs[i].item()
+                    log_D[f"dispreferred_relative_logprob[{beta}]"] = preferred_relative_logprobs[i].item()
+                    log_D[f"reward_accuracy[{beta}]"] = reward_accuracies[i].item()
+                    log_D[f"reward_margin[{beta}]"] = reward_margins[i].item()
+                results.append(log_D)
+
+
+    metrics = ['total loss', 'regularizer']
+    for beta in betas:
+        metrics = metrics + [f"loss[{beta}]", f"preferred_relative_logprob[{beta}]", f"dispreferred_relative_logprob[{beta}]", f"reward_accuracy[{beta}]", f"reward_margin[{beta}]"]
 
     if global_rank == 0:
         # print("[global_rank 0] inside wandb logging block", flush=True)
@@ -375,11 +444,6 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
             if step % 20 == 0 and global_rank == 0:
                 log_D = {
                         'total loss': total_loss.item(),
-                        # 'losses': [x.item() for i, x in enumerate(losses)],
-                        # 'preferred_relative_logprob': [x.item() for i, x in enumerate(preferred_relative_logprobs)],
-                        # 'dispreferred_relative_logprob': [x.item() for i, x in enumerate(dispreferred_relative_logprobs)],
-                        # 'reward_accuracy': [x.item() for i, x in enumerate(reward_accuracies)],
-                        # 'reward_margin': [x.item() for i, x in enumerate(reward_margins)],
                         'regularizer': regularizer.item()
                     }
                 for i, beta in enumerate(betas):
