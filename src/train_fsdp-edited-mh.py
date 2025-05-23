@@ -375,13 +375,19 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
             if step % 20 == 0 and global_rank == 0:
                 log_D = {
                         'total loss': total_loss.item(),
-                        'losses': [x.item() for i, x in enumerate(losses)],
-                        'preferred_relative_logprob': [x.item() for i, x in enumerate(preferred_relative_logprobs)],
-                        'dispreferred_relative_logprob': [x.item() for i, x in enumerate(dispreferred_relative_logprobs)],
-                        'reward_accuracy': [x.item() for i, x in enumerate(reward_accuracies)],
-                        'reward_margin': [x.item() for i, x in enumerate(reward_margins)],
+                        # 'losses': [x.item() for i, x in enumerate(losses)],
+                        # 'preferred_relative_logprob': [x.item() for i, x in enumerate(preferred_relative_logprobs)],
+                        # 'dispreferred_relative_logprob': [x.item() for i, x in enumerate(dispreferred_relative_logprobs)],
+                        # 'reward_accuracy': [x.item() for i, x in enumerate(reward_accuracies)],
+                        # 'reward_margin': [x.item() for i, x in enumerate(reward_margins)],
                         'regularizer': regularizer.item()
                     }
+                for i, beta in enumerate(betas):
+                    log_D[f"loss[{beta}]"] = losses[i].item()
+                    log_D[f"preferred_relative_logprob[{beta}]"] = preferred_relative_logprobs[i].item()
+                    log_D[f"dispreferred_relative_logprob[{beta}]"] = preferred_relative_logprobs[i].item()
+                    log_D[f"reward_accuracy[{beta}]"] = reward_accuracies[i].item()
+                    log_D[f"reward_margin[{beta}]"] = reward_margins[i].item()
                 if args.wandb_enable:
                     wandb.log(log_D)
                 else:
