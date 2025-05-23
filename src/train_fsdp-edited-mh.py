@@ -60,7 +60,9 @@ def calculate_DPO_loss(model_preferred_logprob, model_dispreferred_logprob,
 
     loss = -F.logsigmoid(beta * (preferred_relative_logprob - dispreferred_relative_logprob)).mean()
 
-    return loss, preferred_relative_logprob.mean(), dispreferred_relative_logprob.mean(), reward_accuracies, reward_margins
+    reward = beta * (preferred_relative_logprob - dispreferred_relative_logprob)
+
+    return loss, preferred_relative_logprob.mean(), dispreferred_relative_logprob.mean(), reward_accuracies, reward_margins, reward
 
 
 # def get_log_prob(logits, labels, prompt_lengths):
@@ -342,15 +344,31 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
             dispreferred_relative_logprobs = torch.zeros(len(betas)).cuda()
             reward_accuracies = torch.zeros(len(betas)).cuda()
             reward_margins = torch.zeros(len(betas)).cuda()
+            rewards = []
             for i, beta in enumerate(betas):
-                losses[i], preferred_relative_logprobs[i], dispreferred_relative_logprobs[i], reward_accuracies[i], reward_margins[i] = calculate_DPO_loss(
+                losses[i], preferred_relative_logprobs[i], dispreferred_relative_logprobs[i], reward_accuracies[i], reward_margins[i], reward = calculate_DPO_loss(
                 model_preferred_logprob[i], model_dispreferred_logprob[i],
                 ref_preferred_logprob, ref_dispreferred_logprob,
                 beta=beta)
+                rewards.append(reward)
                 
 
                 
             total_loss = losses.mean()
+
+
+            # Stack into a tensor of shape (n, B)
+            rewards_tensor = torch.stack(rewards, dim=0)  # shape: (n, B)
+            
+            # Compute mean across n
+            with torch.no_grad():
+                mean_rewards = rewards_tensor.mean(dim=0)  # shape: (B,)
+            
+            # Compute squared differences and average
+            regularizer = ((rewards_tensor - mean_rewards)**2).mean()
+            
+            total_loss += 1.0 * regularizer
+            
             total_loss.backward()
             optimizer.step()
 
@@ -361,7 +379,8 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
                         'preferred_relative_logprob': [x.item() for i, x in enumerate(preferred_relative_logprobs)],
                         'dispreferred_relative_logprob': [x.item() for i, x in enumerate(dispreferred_relative_logprobs)],
                         'reward_accuracy': [x.item() for i, x in enumerate(reward_accuracies)],
-                        'reward_margin': [x.item() for i, x in enumerate(reward_margins)]
+                        'reward_margin': [x.item() for i, x in enumerate(reward_margins)],
+                        'regularizer': regularizer.item()
                     }
                 if args.wandb_enable:
                     wandb.log(log_D)
@@ -369,7 +388,7 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
                     print(f"train epoch: {epoch}, step: {step}\n {log_D}")
                 
 
-        evaluate(model, ref_model, eval_loader, local_rank, global_rank, beta, args)
+        # evaluate(model, ref_model, eval_loader, local_rank, global_rank, beta, args)
         # print(f"[rank {global_rank}] finished evaluate()", flush=True)
 
 
