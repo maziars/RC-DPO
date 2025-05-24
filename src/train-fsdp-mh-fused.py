@@ -165,7 +165,7 @@ def wrap_with_fsdp(model, local_rank=0):
 
 def dpo_collate_fn(batch, tokenizer, max_length):
     pad_token_id = tokenizer.pad_token_id
-    prompts = [x['prompt'] for x in batch]
+    prompts = [x['system'] + x['prompt'] for x in batch]
     chosens = [x['chosen'] for x in batch]
     rejecteds = [x['rejected'] for x in batch]
     
