@@ -276,7 +276,7 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
             rewards_tensor = torch.stack(rewards, dim=0)
             mean_rewards = rewards_tensor.mean(dim=0)
             regularizer = ((rewards_tensor - mean_rewards)**2).mean()
-            total_loss += 1.0 * regularizer
+            total_loss += args.reg_weight * regularizer
 
             for i in range(batch['chosen'].size(0)):
                 log_D = {
@@ -371,7 +371,7 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
             with torch.no_grad:
                 mean_rewards = rewards_tensor.mean(dim=0)
             regularizer = ((rewards_tensor - mean_rewards)**2).mean()
-            total_loss += 1.0 * regularizer
+            total_loss += args.reg_weight * regularizer
 
             total_loss.backward()
             optimizer.step()
@@ -446,6 +446,7 @@ def main():
     parser.add_argument("--dataset_name", type=str, default="jondurbin/truthy-dpo-v0.1")
     parser.add_argument("--wandb_project", type=str, default="truthy-dpo")
     parser.add_argument("--wandb_enable", type=bool, default=False)
+    parser.add_argument("--reg_weight", type=float, default=1.0)
     args = parser.parse_args()
 
     seed_everything(args.seed)
