@@ -302,12 +302,6 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
             ref_preferred_logprob = compute_logprobs(ref_preferred_logits, batch['chosen'], batch['chosen_mask'])
             ref_dispreferred_logprob = compute_logprobs(ref_dispreferred_logits, batch['rejected'], batch['rejected_mask'])
 
-            loss, preferred_relative_logprob, dispreferred_relative_logprob, reward_accuracies, reward_margins = calculate_DPO_loss(
-                model_preferred_logprob, model_dispreferred_logprob,
-                ref_preferred_logprob, ref_dispreferred_logprob,
-                beta=beta)
-
-
 
             losses = torch.zeros(len(betas)).cuda()
             rewards = []
@@ -335,38 +329,33 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
 
             for i in range(batch['chosen'].size(0)):
                 log_D = {
-                        'total loss': total_loss.item(),
-                        'regularizer': regularizer.item()
+                        'eval/total loss': total_loss.item(),
+                        'eval/regularizer': regularizer.item()
                     }
                 for i, beta in enumerate(betas):
-                    log_D[f"loss[{beta}]"] = losses[i].item()
-                    log_D[f"preferred_relative_logprob[{beta}]"] = preferred_relative_logprobs[i].item()
-                    log_D[f"dispreferred_relative_logprob[{beta}]"] = preferred_relative_logprobs[i].item()
-                    log_D[f"reward_accuracy[{beta}]"] = reward_accuracies[i].item()
-                    log_D[f"reward_margin[{beta}]"] = reward_margins[i].item()
+                    log_D[f"eval/loss[{beta}]"] = losses[i].item()
+                    log_D[f"eval/preferred_relative_logprob[{beta}]"] = preferred_relative_logprobs[i].item()
+                    log_D[f"eval/dispreferred_relative_logprob[{beta}]"] = preferred_relative_logprobs[i].item()
+                    log_D[f"eval/reward_accuracy[{beta}]"] = reward_accuracies[i].item()
+                    log_D[f"eval/reward_margin[{beta}]"] = reward_margins[i].item()
                 results.append(log_D)
 
 
-    metrics = ['total loss', 'regularizer']
+    metrics = ['eval/total loss', 'eval/regularizer']
     for beta in betas:
-        metrics = metrics + [f"loss[{beta}]", f"preferred_relative_logprob[{beta}]", f"dispreferred_relative_logprob[{beta}]", f"reward_accuracy[{beta}]", f"reward_margin[{beta}]"]
+        metrics = metrics + [f"eval/loss[{beta}]", f"eval/preferred_relative_logprob[{beta}]", f"eval/dispreferred_relative_logprob[{beta}]", f"eval/reward_accuracy[{beta}]", f"eval/reward_margin[{beta}]"]
+
+    aggregated_results = gather_and_aggregate_results(results, metrics)
+
+    for key in aggregated_results.keys():
+        aggregated_results[key] = np.mean(aggregated_results[key]).item()
 
     if global_rank == 0:
-        # print("[global_rank 0] inside wandb logging block", flush=True)
         try:
-            avg = all_results.mean(dim=0).tolist()
-            log_D = {
-                'eval/loss': avg[0],
-                'eval/preferred_relative_logprob': avg[1],
-                'eval/dispreferred_relative_logprob': avg[2],
-                'eval/reward_accuracy': avg[3],
-                'eval/reward_margin': avg[4],
-            }
-            # print("[global_rank 0] log dict:", log_D, flush=True)
             if args.wandb_enable:
-                wandb.log(log_D)
+                wandb.log(aggregated_results)
             else:
-                print(f"Eval:\n {log_D}")
+                print(f"Eval:\n {aggregated_results}")
             # print("[global_rank 0] finished wandb.log", flush=True)
         except Exception as e:
             print(f"[global_rank 0] wandb.log failed: {e}", flush=True)
@@ -458,7 +447,7 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
                     print(f"train epoch: {epoch}, step: {step}\n {log_D}")
                 
 
-        # evaluate(model, ref_model, eval_loader, local_rank, global_rank, beta, args)
+        evaluate(model, ref_model, eval_loader, local_rank, global_rank, betas, args)
         # print(f"[rank {global_rank}] finished evaluate()", flush=True)
 
 
@@ -548,7 +537,7 @@ def main():
 
     dataset = load_dataset(args.dataset_name, split="train")
     if global_rank == 0:
-        dataset = dataset.train_test_split(test_size=0.1, seed=args.seed)
+        dataset = dataset.train_test_split(test_size=0.8, seed=args.seed)
         dataset.save_to_disk("cached_split")
     dist.barrier()
     dataset = DatasetDict.load_from_disk("cached_split")
