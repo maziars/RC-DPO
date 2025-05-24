@@ -8,7 +8,7 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import AdamW
+from torch.optim import AdamW, RMSprop
 from torch.utils.data import DataLoader
 from datasets import load_dataset, Dataset, DatasetDict
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -250,6 +250,8 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
             rewards = []
             reward_accuracies = torch.zeros(len(betas)).cuda()
             reward_margins = torch.zeros(len(betas)).cuda()
+            logp_cs = torch.zeros(len(betas)).cuda()
+            logp_rs = torch.zeros(len(betas)).cuda()
 
             for i, beta in enumerate(betas):
                 head = model.heads[i]
@@ -270,6 +272,8 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
                 losses[i] = loss
                 reward_accuracies[i] = (reward > 0).float().mean()
                 reward_margins[i] = reward.mean()
+                logp_cs[i] = logp_c
+                logp_rs[i] = logp_r
                 rewards.append(reward)
 
             total_loss = losses.mean()
@@ -287,6 +291,8 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
                     log_D[f"eval/loss[{beta}]"] = losses[i].item()
                     log_D[f"eval/reward_accuracy[{beta}]"] = reward_accuracies[i].item()
                     log_D[f"eval/reward_margin[{beta}]"] = reward_margins[i].item()
+                    log_D[f"eval/chosen_rel_logprob[{beta}]"] = logp_cs[i].item()
+                    log_D[f"eval/rejected_rel_logprob[{beta}]"] = logp_rs[i].item()
                 results.append(log_D)
 
     metrics = ['eval/total loss', 'eval/regularizer']
@@ -294,7 +300,9 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
         metrics.extend([
             f"eval/loss[{beta}]",
             f"eval/reward_accuracy[{beta}]",
-            f"eval/reward_margin[{beta}]"
+            f"eval/reward_margin[{beta}]",
+            f"eval/chosen_rel_logprob[{beta}]",
+            f"eval/rejected_rel_logprob[{beta}]",
         ])
 
     aggregated_results = gather_and_aggregate_results(results, metrics)
@@ -344,6 +352,8 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
             rewards = []
             reward_accuracies = torch.zeros(len(betas)).cuda()
             reward_margins = torch.zeros(len(betas)).cuda()
+            logp_cs = torch.zeros(len(betas)).cuda()
+            logp_rs = torch.zeros(len(betas)).cuda()
 
             for i, beta in enumerate(betas):
                 head = model.heads[i]
@@ -364,13 +374,16 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
                 losses[i] = loss
                 reward_accuracies[i] = (reward > 0).float().mean()
                 reward_margins[i] = reward.mean()
+                logp_cs[i] = logp_c
+                logp_rs[i] = logp_r
                 rewards.append(reward)
 
             total_loss = losses.mean()
             rewards_tensor = torch.stack(rewards, dim=0)
-            with torch.no_grad:
+            with torch.no_grad():
                 mean_rewards = rewards_tensor.mean(dim=0)
-            regularizer = ((rewards_tensor - mean_rewards)**2).mean()
+                # reward_norm = torch.pow(rewards_tensor, 2).mean() + 1e-6
+            regularizer = ((rewards_tensor - mean_rewards)**2).mean()#/reward_norm
             total_loss += args.reg_weight * regularizer
 
             total_loss.backward()
@@ -379,12 +392,14 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
             if step % 20 == 0 and global_rank == 0:
                 log_D = {
                     'total loss': total_loss.item(),
-                    'regularizer': regularizer.item()
+                    'regularizer': regularizer.item(),
                 }
                 for i, beta in enumerate(betas):
                     log_D[f"loss[{beta}]"] = losses[i].item()
                     log_D[f"reward_accuracy[{beta}]"] = reward_accuracies[i].item()
                     log_D[f"reward_margin[{beta}]"] = reward_margins[i].item()
+                    log_D[f"chosen_rel_logprob[{beta}]"] = logp_cs[i].item()
+                    log_D[f"rejected_rel_logprob[{beta}]"] = logp_rs[i].item()
                 if args.wandb_enable:
                     wandb.log(log_D)
                 else:
@@ -447,6 +462,7 @@ def main():
     parser.add_argument("--wandb_project", type=str, default="truthy-dpo")
     parser.add_argument("--wandb_enable", type=bool, default=False)
     parser.add_argument("--reg_weight", type=float, default=1.0)
+    parser.add_argument("--eval_ratio", type=float, default=0.6)
     args = parser.parse_args()
 
     seed_everything(args.seed)
@@ -467,7 +483,8 @@ def main():
     # base_model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16)
     # base_model = MultiHeadCausalLM(args.model_name, num_heads = num_heads, dtype=torch.bfloat16)
     # model = wrap_with_fsdp(base_model)
-    base_model = MultiHeadCausalLM(args.model_name, num_heads=num_heads, dtype=torch.bfloat16)
+    # base_model = MultiHeadCausalLM(args.model_name, num_heads=num_heads, dtype=torch.bfloat16)
+    base_model = MultiHeadCausalLM(args.model_name, num_heads=num_heads, dtype=torch.float32)
 
     # ✅ Individually wrap heads before FSDP wraps the full model
     for i in range(len(base_model.heads)):
@@ -476,11 +493,12 @@ def main():
     model = wrap_with_fsdp(base_model)
 
     ref_model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16).cuda()
+    # ref_model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.float32).cuda()
     ref_model.eval()
 
     dataset = load_dataset(args.dataset_name, split="train")
     if global_rank == 0:
-        dataset = dataset.train_test_split(test_size=0.3, seed=args.seed)
+        dataset = dataset.train_test_split(test_size=args.eval_ratio, seed=args.seed)
         dataset.save_to_disk("cached_split")
     dist.barrier()
     dataset = DatasetDict.load_from_disk("cached_split")
@@ -497,7 +515,8 @@ def main():
     else:
         eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
 
-    optimizer = AdamW(model.parameters(), lr=args.lr)
+    # optimizer = AdamW(model.parameters(), lr=args.lr)
+    optimizer = RMSprop(model.parameters(), lr = args.lr)
     train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, local_rank, global_rank, args, epochs=args.epochs, betas=args.betas)
 
     if dist.get_rank() == 0:

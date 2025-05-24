@@ -10,3 +10,4 @@ torchrun --nproc-per-node=1 src/train_fsdp-edited-mh.py\
     --model_name "microsoft/phi-1_5" \
     --dataset_name "jondurbin/truthy-dpo-v0.1" \
     --wandb_project "truthy-dpo" \
+    --wandb_enable True
