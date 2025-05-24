@@ -38,7 +38,7 @@ import torch.distributed as dist
 from collections import defaultdict
 from collections.abc import Iterable
 
-
+os.environ["WANDB_DISABLE_SYSTEM"] = "true"
 
 def gather_and_aggregate_results(local_results, metric_keys):
     """
@@ -98,16 +98,17 @@ def init_distributed():
 
 # --- Loss Functions ---
 def compute_logp_from_hidden(hidden_states, input_ids, attention_mask, lm_head_weight, lm_head_bias):
-    lm_head_weight = lm_head_weight.to(dtype=hidden_states.dtype, device=hidden_states.device)
-    lm_head_bias = lm_head_bias.to(dtype=hidden_states.dtype, device=hidden_states.device)
-    logits = torch.einsum("bth,vh->btv", hidden_states, lm_head_weight) + lm_head_bias
-    shifted_input_ids = input_ids[:, 1:]
-    shifted_attention_mask = attention_mask[:, 1:]
-    shifted_logits = logits[:, :-1, :]
-    log_probs = F.log_softmax(shifted_logits, dim=-1)
-    selected_log_probs = torch.gather(log_probs, dim=-1, index=shifted_input_ids.unsqueeze(-1)).squeeze(-1)
-    selected_log_probs *= shifted_attention_mask
-    seq_log_prob = selected_log_probs.sum(dim=-1) / (shifted_attention_mask.sum(dim=-1) + 1e-6)
+    # lm_head_weight = lm_head_weight.to(dtype=hidden_states.dtype, device=hidden_states.device)
+    # lm_head_bias = lm_head_bias.to(dtype=hidden_states.dtype, device=hidden_states.device)
+    with torch.amp.autocast(device_type='cuda', dtype=torch.float32):
+        logits = torch.einsum("bth,vh->btv", hidden_states, lm_head_weight) + lm_head_bias
+        shifted_input_ids = input_ids[:, 1:]
+        shifted_attention_mask = attention_mask[:, 1:]
+        shifted_logits = logits[:, :-1, :]
+        log_probs = F.log_softmax(shifted_logits, dim=-1)
+        selected_log_probs = torch.gather(log_probs, dim=-1, index=shifted_input_ids.unsqueeze(-1)).squeeze(-1)
+        selected_log_probs *= shifted_attention_mask
+        seq_log_prob = selected_log_probs.sum(dim=-1) / (shifted_attention_mask.sum(dim=-1) + 1e-6)
     return seq_log_prob
 
 def fused_dpo_loss_with_reward(
@@ -454,6 +455,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--betas", type=float, nargs='+', default=[0.1, 0.01], help="List of beta values")
     parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--eval_batch_size", type=int, default=32)
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--seed", type=int, default=2003)
@@ -511,9 +513,9 @@ def main():
     collate = partial(dpo_collate_fn, tokenizer=tokenizer, max_length=args.max_length)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
     if len(eval_dataset) == 0:
-        eval_loader = DataLoader([], batch_size=arg.batch_size)
+        eval_loader = DataLoader([], batch_size=arg.eval_batch_size)
     else:
-        eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
+        eval_loader = DataLoader(eval_dataset, batch_size=args.eval_batch_size, shuffle=False, collate_fn=collate)
 
     # optimizer = AdamW(model.parameters(), lr=args.lr)
     optimizer = RMSprop(model.parameters(), lr = args.lr)

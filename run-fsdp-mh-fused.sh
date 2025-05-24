@@ -11,4 +11,5 @@ torchrun --nproc-per-node=1 src/train-fsdp-mh-fused.py\
     --dataset_name "jondurbin/truthy-dpo-v0.1" \
     --wandb_project "truthy-dpo" \
     --wandb_enable True \
-    --reg_weight 0.0
+    --reg_weight 0.0 \
+    --eval_ratio 0.8
