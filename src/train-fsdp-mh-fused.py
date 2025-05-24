@@ -280,21 +280,21 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
 
             for i in range(batch['chosen'].size(0)):
                 log_D = {
-                    'total loss': total_loss.item(),
-                    'regularizer': regularizer.item()
+                    'eval/total loss': total_loss.item(),
+                    'eval/regularizer': regularizer.item()
                 }
                 for i, beta in enumerate(betas):
-                    log_D[f"loss[{beta}]"] = losses[i].item()
-                    log_D[f"reward_accuracy[{beta}]"] = reward_accuracies[i].item()
-                    log_D[f"reward_margin[{beta}]"] = reward_margins[i].item()
+                    log_D[f"eval/loss[{beta}]"] = losses[i].item()
+                    log_D[f"eval/reward_accuracy[{beta}]"] = reward_accuracies[i].item()
+                    log_D[f"eval/reward_margin[{beta}]"] = reward_margins[i].item()
                 results.append(log_D)
 
-    metrics = ['total loss', 'regularizer']
+    metrics = ['eval/total loss', 'eval/regularizer']
     for beta in betas:
         metrics.extend([
-            f"loss[{beta}]",
-            f"reward_accuracy[{beta}]",
-            f"reward_margin[{beta}]"
+            f"eval/loss[{beta}]",
+            f"eval/reward_accuracy[{beta}]",
+            f"eval/reward_margin[{beta}]"
         ])
 
     aggregated_results = gather_and_aggregate_results(results, metrics)
@@ -368,7 +368,8 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
 
             total_loss = losses.mean()
             rewards_tensor = torch.stack(rewards, dim=0)
-            mean_rewards = rewards_tensor.mean(dim=0)
+            with torch.no_grad:
+                mean_rewards = rewards_tensor.mean(dim=0)
             regularizer = ((rewards_tensor - mean_rewards)**2).mean()
             total_loss += 1.0 * regularizer
 
@@ -478,7 +479,7 @@ def main():
 
     dataset = load_dataset(args.dataset_name, split="train")
     if global_rank == 0:
-        dataset = dataset.train_test_split(test_size=0.75, seed=args.seed)
+        dataset = dataset.train_test_split(test_size=0.3, seed=args.seed)
         dataset.save_to_disk("cached_split")
     dist.barrier()
     dataset = DatasetDict.load_from_disk("cached_split")
