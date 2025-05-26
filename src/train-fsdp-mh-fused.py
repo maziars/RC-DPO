@@ -240,9 +240,10 @@ def dpo_collate_fn(batch, tokenizer, max_length):
 def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args):
     model.eval()
     results = []
-
+    
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating"):
+            
             batch = {k: v.cuda() for k, v in batch.items()}
 
             with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
@@ -260,6 +261,7 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
                                                              ref_model.lm_head.weight, ref_model.lm_head.bias)
 
             losses = torch.zeros(len(betas)).cuda()
+            log_D = {}
             rewards = []
             reward_accuracies = torch.zeros(len(betas)).cuda()
             reward_margins = torch.zeros(len(betas)).cuda()
@@ -289,24 +291,26 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
                 logp_cs[i] = logp_c
                 logp_rs[i] = logp_r
                 rewards.append(reward)
+                log_D[f"eval/raw_reward_margin[{beta}]"] = reward.detach().cpu().tolist()
 
             total_loss = losses.mean()
             rewards_tensor = torch.stack(rewards, dim=0)
             mean_rewards = rewards_tensor.mean(dim=0)
             regularizer = ((rewards_tensor - mean_rewards)**2).mean()
             total_loss += args.reg_weight * regularizer
+            
 
             for i in range(batch['chosen'].size(0)):
-                log_D = {
-                    'eval/total loss': total_loss.item(),
-                    'eval/regularizer': regularizer.item()
-                }
+                log_D = ['eval/total loss']= total_loss.item(),
+                log_D = ['eval/regularizer'] = regularizer.item()
+
                 for i, beta in enumerate(betas):
                     log_D[f"eval/loss[{beta}]"] = losses[i].item()
                     log_D[f"eval/reward_accuracy[{beta}]"] = reward_accuracies[i].item()
                     log_D[f"eval/reward_margin[{beta}]"] = reward_margins[i].item()
                     log_D[f"eval/chosen_rel_logprob[{beta}]"] = logp_cs[i].item()
                     log_D[f"eval/rejected_rel_logprob[{beta}]"] = logp_rs[i].item()
+                    log_D[f"eval/raw_reward_margin[{beta}]"] = reward.detach().cpu().tolist()
                 results.append(log_D)
 
     metrics = ['eval/total loss', 'eval/regularizer']
@@ -317,11 +321,23 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
             f"eval/reward_margin[{beta}]",
             f"eval/chosen_rel_logprob[{beta}]",
             f"eval/rejected_rel_logprob[{beta}]",
+            f"eval/raw_reward_margin[{beta}]",
         ])
 
     aggregated_results = gather_and_aggregate_results(results, metrics)
     for key in aggregated_results.keys():
         aggregated_results[key] = np.mean(aggregated_results[key]).item()
+
+    for beta in betas:
+        key = f"eval/raw_reward_margin[{beta}]"
+        reward_margins_all = np.array(aggregated_results.pop(key))  # remove to avoid confusion
+    
+        aggregated_results[f"eval/reward_margin[{beta}]/mean"] = float(np.mean(reward_margins_all))
+        aggregated_results[f"eval/reward_margin[{beta}]/median"] = float(np.median(reward_margins_all))
+        aggregated_results[f"eval/reward_margin[{beta}]/p5"] = float(np.percentile(reward_margins_all, 5))
+        aggregated_results[f"eval/reward_margin[{beta}]/p10"] = float(np.percentile(reward_margins_all, 10))
+        aggregated_results[f"eval/reward_margin[{beta}]/p20"] = float(np.percentile(reward_margins_all, 20))
+        # aggregated_results[f"eval/reward_margin[{beta}]/p90"] = float(np.percentile(reward_margins_all, 90))
 
     if global_rank == 0:
         try:
@@ -469,7 +485,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--betas", type=float, nargs='+', default=[0.1, 0.01], help="List of beta values")
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--eval_batch_size", type=int, default=32)
+    parser.add_argument("--eval_batch_size", type=int, default=24)
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--seed", type=int, default=2003)
