@@ -310,7 +310,6 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
                     log_D[f"eval/reward_margin[{beta}]"] = reward_margins[i].item()
                     log_D[f"eval/chosen_rel_logprob[{beta}]"] = logp_cs[i].item()
                     log_D[f"eval/rejected_rel_logprob[{beta}]"] = logp_rs[i].item()
-                    log_D[f"eval/raw_reward_margin[{beta}]"] = reward.detach().cpu().tolist()
                 results.append(log_D)
 
     metrics = ['eval/total loss', 'eval/regularizer']
@@ -332,11 +331,11 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
         key = f"eval/raw_reward_margin[{beta}]"
         reward_margins_all = np.array(aggregated_results.pop(key))  # remove to avoid confusion
     
-        aggregated_results[f"eval/reward_margin[{beta}]/mean"] = float(np.mean(reward_margins_all))
-        aggregated_results[f"eval/reward_margin[{beta}]/median"] = float(np.median(reward_margins_all))
-        aggregated_results[f"eval/reward_margin[{beta}]/p5"] = float(np.percentile(reward_margins_all, 5))
-        aggregated_results[f"eval/reward_margin[{beta}]/p10"] = float(np.percentile(reward_margins_all, 10))
-        aggregated_results[f"eval/reward_margin[{beta}]/p20"] = float(np.percentile(reward_margins_all, 20))
+        aggregated_results[f"eval/reward_margin[{beta}] mean"] = float(np.mean(reward_margins_all))
+        aggregated_results[f"eval/reward_margin[{beta}] median"] = float(np.median(reward_margins_all))
+        aggregated_results[f"eval/reward_margin[{beta}] p5"] = float(np.percentile(reward_margins_all, 5))
+        aggregated_results[f"eval/reward_margin[{beta}] p10"] = float(np.percentile(reward_margins_all, 10))
+        aggregated_results[f"eval/reward_margin[{beta}] p20"] = float(np.percentile(reward_margins_all, 20))
         # aggregated_results[f"eval/reward_margin[{beta}]/p90"] = float(np.percentile(reward_margins_all, 90))
 
     if global_rank == 0:
