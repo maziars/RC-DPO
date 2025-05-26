@@ -301,8 +301,8 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
             
 
             for i in range(batch['chosen'].size(0)):
-                log_D = ['eval/total loss']= total_loss.item(),
-                log_D = ['eval/regularizer'] = regularizer.item()
+                log_D['eval/total loss']= total_loss.item(),
+                log_D['eval/regularizer'] = regularizer.item()
 
                 for i, beta in enumerate(betas):
                     log_D[f"eval/loss[{beta}]"] = losses[i].item()
