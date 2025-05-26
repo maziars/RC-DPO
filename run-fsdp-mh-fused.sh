@@ -5,11 +5,11 @@ torchrun --nproc-per-node=1 src/train-fsdp-mh-fused.py\
     --batch_size 16 \
     --max_length 1024 \
     --lr 1e-5 \
-    --betas 0.5 0.1 0.05\
+    --betas 0.5\
     --seed 2003 \
     --model_name "microsoft/phi-1_5" \
     --dataset_name "jondurbin/truthy-dpo-v0.1" \
     --wandb_project "truthy-dpo" \
-    --wandb_enable True \
     --reg_weight 0.0 \
+    --wandb_enable True \
     --eval_ratio 0.9

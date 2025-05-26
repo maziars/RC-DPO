@@ -123,16 +123,28 @@ def fused_dpo_loss_with_reward(
     lm_head_weight,
     lm_head_bias,
     beta,
+    sft_weight=1.0,  # weight for SFT loss
 ):
+    # Compute model log-probs
     model_logp_chosen = compute_logp_from_hidden(
         hidden_chosen, input_ids_chosen, attention_mask_chosen, lm_head_weight, lm_head_bias
     )
     model_logp_rejected = compute_logp_from_hidden(
         hidden_rejected, input_ids_rejected, attention_mask_rejected, lm_head_weight, lm_head_bias
     )
+
+    # DPO reward and loss
     reward = beta * ((model_logp_chosen - model_logp_rejected) - (ref_logp_chosen - ref_logp_rejected))
-    loss = -F.logsigmoid(reward).mean()
+    dpo_loss = -F.logsigmoid(reward).mean()
+
+    # SFT loss on the chosen response
+    sft_loss = -model_logp_chosen.mean()
+
+    # Combined loss
+    loss = dpo_loss + sft_weight * sft_loss
+
     return loss, reward, (model_logp_chosen.mean() - ref_logp_chosen.mean()), (model_logp_rejected.mean() - ref_logp_rejected.mean())
+
 
 
 
@@ -165,7 +177,7 @@ def wrap_with_fsdp(model, local_rank=0):
 
 def dpo_collate_fn(batch, tokenizer, max_length):
     pad_token_id = tokenizer.pad_token_id
-    prompts = [x['system'] + x['prompt'] for x in batch]
+    prompts = [x['system'] + '\n' + x['prompt'] for x in batch]
     chosens = [x['chosen'] for x in batch]
     rejecteds = [x['rejected'] for x in batch]
     
@@ -269,6 +281,7 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
                     head.weight,
                     head.bias,
                     beta,
+                    args.sft_weight,
                 )
                 losses[i] = loss
                 reward_accuracies[i] = (reward > 0).float().mean()
@@ -371,6 +384,7 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
                     head.weight,
                     head.bias,
                     beta,
+                    args.sft_weight,
                 )
                 losses[i] = loss
                 reward_accuracies[i] = (reward > 0).float().mean()
@@ -465,6 +479,7 @@ def main():
     parser.add_argument("--wandb_enable", type=bool, default=False)
     parser.add_argument("--reg_weight", type=float, default=1.0)
     parser.add_argument("--eval_ratio", type=float, default=0.6)
+    parser.add_argument("--sft_weight", type=float, default=1.0)
     args = parser.parse_args()
 
     seed_everything(args.seed)
