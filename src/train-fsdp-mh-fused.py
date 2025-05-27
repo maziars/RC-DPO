@@ -76,7 +76,12 @@ def gather_and_aggregate_results(local_results, metric_keys):
         for k in metric_keys:
             v = res[k]
             if isinstance(v, Iterable) and not isinstance(v, str):
-                aggregated[k].extend(v)
+                # Flatten list of lists safely
+                for item in v:
+                    if isinstance(item, Iterable) and not isinstance(item, str):
+                        aggregated[k].extend(item)
+                    else:
+                        aggregated[k].append(item)
             else:
                 aggregated[k].append(v)
 
@@ -291,26 +296,24 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
                 logp_cs[i] = logp_c
                 logp_rs[i] = logp_r
                 rewards.append(reward)
+                
                 log_D[f"eval/raw_reward_margin[{beta}]"] = reward.detach().cpu().tolist()
+                log_D[f"eval/loss[{beta}]"] = losses[i].item()
+                log_D[f"eval/reward_accuracy[{beta}]"] = reward_accuracies[i].item()
+                log_D[f"eval/reward_margin[{beta}]"] = reward_margins[i].item()
+                log_D[f"eval/chosen_rel_logprob[{beta}]"] = logp_cs[i].item()
+                log_D[f"eval/rejected_rel_logprob[{beta}]"] = logp_rs[i].item()
 
             total_loss = losses.mean()
             rewards_tensor = torch.stack(rewards, dim=0)
             mean_rewards = rewards_tensor.mean(dim=0)
             regularizer = ((rewards_tensor - mean_rewards)**2).mean()
             total_loss += args.reg_weight * regularizer
-            
-
-            for i in range(batch['chosen'].size(0)):
-                log_D['eval/total loss']= total_loss.item(),
-                log_D['eval/regularizer'] = regularizer.item()
-
-                for i, beta in enumerate(betas):
-                    log_D[f"eval/loss[{beta}]"] = losses[i].item()
-                    log_D[f"eval/reward_accuracy[{beta}]"] = reward_accuracies[i].item()
-                    log_D[f"eval/reward_margin[{beta}]"] = reward_margins[i].item()
-                    log_D[f"eval/chosen_rel_logprob[{beta}]"] = logp_cs[i].item()
-                    log_D[f"eval/rejected_rel_logprob[{beta}]"] = logp_rs[i].item()
-                results.append(log_D)
+        
+            log_D['eval/total loss']= total_loss.item(),
+            log_D['eval/regularizer'] = regularizer.item()
+            results.append(log_D)
+                    
 
     metrics = ['eval/total loss', 'eval/regularizer']
     for beta in betas:
@@ -324,13 +327,15 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
         ])
 
     aggregated_results = gather_and_aggregate_results(results, metrics)
-    for key in aggregated_results.keys():
-        aggregated_results[key] = np.mean(aggregated_results[key]).item()
+    for key in list(aggregated_results.keys()):
+        if "raw_reward_margin" not in key:
+            aggregated_results[key] = np.mean(aggregated_results[key]).item()
 
     for beta in betas:
         key = f"eval/raw_reward_margin[{beta}]"
         reward_margins_all = np.array(aggregated_results.pop(key))  # remove to avoid confusion
-    
+        # print(f"Length of reward margins for beta={beta}: {len(reward_margins_all)}")
+        # print(f"Sample values: {reward_margins_all[:5]}")
         aggregated_results[f"eval/reward_margin[{beta}] mean"] = float(np.mean(reward_margins_all))
         aggregated_results[f"eval/reward_margin[{beta}] median"] = float(np.median(reward_margins_all))
         aggregated_results[f"eval/reward_margin[{beta}] p5"] = float(np.percentile(reward_margins_all, 5))
