@@ -10,7 +10,7 @@ torchrun --nproc-per-node=1 src/train-fsdp-mh-fused-SV.py\
     --model_name "microsoft/phi-1_5" \
     --dataset_name "jondurbin/truthy-dpo-v0.1" \
     --wandb_project "truthy-dpo" \
-    --reg_weight 1e-4 \
+    --reg_weight 1e-3 \
     --wandb_enable True \
     --eval_ratio 0.9 \
     --margin 6.0
