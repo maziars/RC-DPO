@@ -310,7 +310,15 @@ def evaluate(model, ref_model, dataloader, local_rank, global_rank, betas, args)
             total_loss = losses.mean()
             rewards_tensor = torch.stack(rewards, dim=0)
             mean_rewards = rewards_tensor.mean(dim=0)
-            regularizer = ((rewards_tensor - mean_rewards)**2).mean()
+            # regularizer = ((rewards_tensor - mean_rewards)**2).mean()
+            squared_deviation = (rewards_tensor - mean_rewards) ** 2  # [B, N]
+            var_per_datapoint = squared_deviation.mean(dim=0)  # [N]
+            
+            # Step 3: hard mask (zeros out unwanted dimensions)
+            mask = (mean_rewards >= args.margin).float()  # [N], 1s and 0s
+            
+            # Step 4: apply mask but normalize by N (not number of positives)
+            regularizer = (var_per_datapoint * mask).sum() / len(mean_rewards)  # scalar
             total_loss += args.reg_weight * regularizer
         
             log_D['eval/total loss']= total_loss.item(),
@@ -422,7 +430,16 @@ def train(model, ref_model, tokenizer, optimizer, train_loader, eval_loader, loc
             with torch.no_grad():
                 mean_rewards = rewards_tensor.mean(dim=0)
                 # reward_norm = torch.pow(rewards_tensor, 2).mean() + 1e-6
-            regularizer = ((rewards_tensor - mean_rewards)**2).mean()#/reward_norm
+            # regularizer = ((rewards_tensor - mean_rewards)**2).mean()#/reward_norm
+            squared_deviation = (rewards_tensor - mean_rewards) ** 2  # [B, N]
+            var_per_datapoint = squared_deviation.mean(dim=0)  # [N]
+            
+            # Step 3: hard mask (zeros out unwanted dimensions)
+            mask = (mean_rewards >= args.margin).float()  # [N], 1s and 0s
+            
+            # Step 4: apply mask but normalize by N (not number of positives)
+            regularizer = (var_per_datapoint * mask).sum() / len(mean_rewards)  # scalar
+            
             total_loss += args.reg_weight * regularizer
 
             total_loss.backward()
