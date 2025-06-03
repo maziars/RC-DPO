@@ -522,7 +522,10 @@ def main():
     parser.add_argument("--eval_ratio", type=float, default=0.6)
     parser.add_argument("--sft_weight", type=float, default=1.0)
     parser.add_argument("--margin", type=float, default=4.0)
+    parser.add_argument("--output_dir", type=str, default='.')
     args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
 
     seed_everything(args.seed)
     init_distributed()
@@ -587,7 +590,7 @@ def main():
     
     # Save only on rank 0
     if dist.get_rank() == 0:
-        torch.save(state_dict, "fsdp_model_checkpoint.pt")
+        torch.save(state_dict, args.output_dir + "/fsdp_model_checkpoint.pt")
         print("[rank 0] checkpoint saved!", flush=True)
     
     dist.barrier()  # optional: sync all ranks before continuing
